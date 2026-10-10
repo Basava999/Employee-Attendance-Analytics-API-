@@ -11,6 +11,7 @@ import calendar
 import logging
 import os
 import re
+from contextlib import asynccontextmanager
 from datetime import datetime, date, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Optional
@@ -83,26 +84,10 @@ attendance_col = db["attendance_logs"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# FastAPI app
+# Index creation (called from lifespan)
 # ═══════════════════════════════════════════════════════════════════════════════
-app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0")
-
-
-# ─── custom exception handler for non-validation errors ──────────────────────
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"detail": exc.detail},
-    )
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Startup: create indexes idempotently
-# ═══════════════════════════════════════════════════════════════════════════════
-@app.on_event("startup")
 def create_indexes():
-    """Create required indexes at startup, idempotently. Log failures but don't crash."""
+    """Create required indexes idempotently. Log failures but don't crash."""
     indexes = [
         # employees
         (
@@ -133,6 +118,35 @@ def create_indexes():
             logger.info(f"Index {kwargs['name']} on {col.name}: OK")
         except Exception as e:
             logger.error(f"Index {kwargs['name']} on {col.name} failed: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Lifespan: startup + shutdown
+# ═══════════════════════════════════════════════════════════════════════════════
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Modern lifespan handler — replaces deprecated on_event('startup')."""
+    create_indexes()
+    yield
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FastAPI app
+# ═══════════════════════════════════════════════════════════════════════════════
+app = FastAPI(
+    title="Employee Attendance & Analytics API",
+    version="2.0.0",
+    lifespan=lifespan,
+)
+
+
+# ─── custom exception handler for non-validation errors ──────────────────────
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
