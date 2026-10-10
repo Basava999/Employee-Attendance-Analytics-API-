@@ -1,11 +1,16 @@
-# DECISIONS.md  (about 150-200 words in total - plain language, your own words)
+# DECISIONS.md
 
-1. **Indexes.** Four indexes: (a) unique `{emp_code:1}` on employees — enforces uniqueness for concurrent creates; (b) `{department:1, joined_on:1}` on employees — serves department filtering and headcount queries (`joined_on <= X`); (c) unique `{emp_code:1, date:1}` on attendance_logs — enforces one record per employee per day and supports employee+month lookups and `$lookup` joins; (d) `{date:-1, emp_code:1}` on attendance_logs — serves the attendance list sort and date-range analytics without a blocking sort. I considered a `{status:1, date:-1}` index for status-only queries but rejected it: the date-based index already covers the sort, and adding a status-leading index would slow writes for a rare filter.
+1. **Indexes:** Four indexes:
+- `{emp_code: 1}` (unique) on `employees`: enforces uniqueness on creation.
+- `{department: 1, joined_on: 1}` on `employees`: covers department filters and headcount queries (`joined_on <= end`).
+- `{emp_code: 1, date: 1}` (unique) on `attendance_logs`: prevents duplicate punches and optimizes `$lookup` joins.
+- `{date: -1, emp_code: 1}` on `attendance_logs`: serves list sorting and date ranges without in-memory sorts.
+*Rejected:* `{status: 1, date: -1}`—rejected because status filters are rare and date-leading scans satisfy sorting without burdening write throughput.
 
-2. **Punch-in race.** Both requests pass body validation, find the employee, and call `insert_one`. The unique `{emp_code, date}` index allows exactly one. The loser gets a `DuplicateKeyError`, caught and returned as 409.
+2. **Punch-in race:** Both concurrent requests pass validation. The compound unique index `{emp_code, date}` admits exactly one `insert_one`. The winner returns 201; the loser triggers `DuplicateKeyError`, caught and returned as 409.
 
-3. **Ties.** The pipeline uses `$setWindowFields` with `$rank` (competition ranking: 1,2,2,4). The filter is `rank <= limit`, so both tied employees at the cutoff are returned. Output may exceed `limit` rows.
+3. **Ties:** The pipeline uses `$setWindowFields` with `$rank` (1,2,2,4 ranking). Filtering `rank <= limit` returns all tied employees at the cutoff, which can exceed `limit` rows.
 
-4. **Headcount.** The department summary pipeline starts from `employees` with `joined_on <= month_end`, then `$lookup` attendance. Employees with zero logs still appear because the `$unwind` uses `preserveNullAndEmptyArrays: true`. They contribute to headcount but not to attendance totals.
+4. **Headcount:** The pipeline drives from `employees` filtering `joined_on <= month_end`, then `$lookup` joins logs with `preserveNullAndEmptyArrays: true`. Zero-log employees are preserved, contributing to headcount.
 
-5. **One thing you would change** at 100x data: add read replicas for analytics queries, shard `attendance_logs` by `emp_code` for write distribution, and pre-aggregate monthly summaries into a materialized collection updated on each write to avoid scanning millions of records per analytics request.
+5. **100x Data:** Shard `attendance_logs` by `emp_code`, route analytics to read replicas, and maintain materialized monthly rollups updated on write to eliminate multi-million document scans.

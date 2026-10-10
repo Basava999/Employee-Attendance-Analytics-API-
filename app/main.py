@@ -791,16 +791,14 @@ def punch_out(body: PunchOutRequest):
 
     # Validate: punched_at must be > punch_in
     if ts <= punch_in_dt:
-        raise HTTPException(
-            422,
-            detail="punch_out must be after punch_in",
+        raise RequestValidationError(
+            [{"loc": ["body", "punched_at"], "msg": "punch_out must be after punch_in", "type": "value_error"}]
         )
 
     # Validate: within 24 hours of punch_in
     if (ts - punch_in_dt).total_seconds() > 86400:
-        raise HTTPException(
-            422,
-            detail="punch_out must be within 24 hours of punch_in",
+        raise RequestValidationError(
+            [{"loc": ["body", "punched_at"], "msg": "punch_out must be within 24 hours of punch_in", "type": "value_error"}]
         )
 
     # Check if already closed — 409 if punch_out already set
@@ -933,7 +931,7 @@ def regularize_attendance(
     try:
         validate_date_string(date)
     except ValueError:
-        raise HTTPException(422, detail="Invalid date in path")
+        raise RequestValidationError([{"loc": ["path", "date"], "msg": "Invalid date in path", "type": "value_error"}])
 
     # Employee must exist
     emp = employees_col.find_one({"emp_code": emp_code}, {"_id": 0})
@@ -959,9 +957,8 @@ def regularize_attendance(
         # ABSENT/LEAVE: no punches allowed
         if new_status in NON_PRESENCE_STATUSES:
             if body.punch_in is not None or body.punch_out is not None:
-                raise HTTPException(
-                    422,
-                    detail=f"Cannot supply punch times with status {new_status}",
+                raise RequestValidationError(
+                    [{"loc": ["body", "status"], "msg": f"Cannot supply punch times with status {new_status}", "type": "value_error"}]
                 )
             # Clear punches
             new_punch_in = None
@@ -970,9 +967,8 @@ def regularize_attendance(
         # Presence status requires a punch_in
         if new_status in PRESENCE_STATUSES:
             if new_punch_in is None:
-                raise HTTPException(
-                    422,
-                    detail="Presence status requires a punch_in (supplied or already stored)",
+                raise RequestValidationError(
+                    [{"loc": ["body", "punch_in"], "msg": "Presence status requires a punch_in (supplied or already stored)", "type": "value_error"}]
                 )
 
         # punch_in must resolve to the record's date
@@ -981,21 +977,20 @@ def regularize_attendance(
                 new_punch_in, emp["shift_start"], emp["shift_end"]
             )
             if resolved_date != date:
-                raise HTTPException(
-                    422,
-                    detail=f"punch_in does not resolve to attendance date {date}",
+                raise RequestValidationError(
+                    [{"loc": ["body", "punch_in"], "msg": f"punch_in does not resolve to attendance date {date}", "type": "value_error"}]
                 )
 
         # punch_out without punch_in
         if new_punch_out is not None and new_punch_in is None:
-            raise HTTPException(422, detail="punch_out without punch_in")
+            raise RequestValidationError([{"loc": ["body", "punch_out"], "msg": "punch_out without punch_in", "type": "value_error"}])
 
         # punch_out must be after punch_in and within 24h
         if new_punch_out is not None and new_punch_in is not None:
             if new_punch_out <= new_punch_in:
-                raise HTTPException(422, detail="punch_out must be after punch_in")
+                raise RequestValidationError([{"loc": ["body", "punch_out"], "msg": "punch_out must be after punch_in", "type": "value_error"}])
             if (new_punch_out - new_punch_in).total_seconds() > 86400:
-                raise HTTPException(422, detail="punch_out must be within 24 hours of punch_in")
+                raise RequestValidationError([{"loc": ["body", "punch_out"], "msg": "punch_out must be within 24 hours of punch_in", "type": "value_error"}])
 
         # ── Compute derived fields ──
         derived = compute_all_derived(
@@ -1056,7 +1051,7 @@ def regularize_attendance(
 
         # Nothing actually changed → 422
         if not changes:
-            raise HTTPException(422, detail="No fields changed")
+            raise RequestValidationError([{"loc": ["body"], "msg": "No fields changed", "type": "value_error"}])
 
         # Build the update set
         update_fields["status"] = new_status
