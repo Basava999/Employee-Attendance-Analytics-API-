@@ -239,6 +239,50 @@ class TestHalfUpRounding:
         assert avg_7d == 0.00025
         assert half_up_round(avg_7d, 4) == 0.0003
 
+    def test_half_up_round_exact_arithmetic_boundaries(self):
+        """
+        Verify that half_up_round uses exact decimal arithmetic and does not
+        prematurely round values just below half-up boundaries via round(value, 12).
+        Tests immediately below, exactly at, and immediately above rounding boundaries
+        for both 2 and 4 decimal places, including Decimal and float inputs.
+        """
+        from app.main import half_up_round
+        from decimal import Decimal
+
+        # 2 decimal places boundary: 0.005 -> 0.01
+        # Values strictly below 0.005 must round down to 0.00
+        assert half_up_round(0.004999999999999, 2) == 0.00
+        assert half_up_round(Decimal("0.004999999999999999"), 2) == 0.00
+        assert half_up_round(0.005, 2) == 0.01
+        assert half_up_round(Decimal("0.005"), 2) == 0.01
+        assert half_up_round(0.005000000000001, 2) == 0.01
+        assert half_up_round(Decimal("0.005000000000000001"), 2) == 0.01
+
+        # 2 decimal places with even integer base (test non-banker rounding):
+        # 0.125 -> 0.13 (banker's would round to 0.12)
+        assert half_up_round(0.124999999999999, 2) == 0.12
+        assert half_up_round(Decimal("0.1249999999999999"), 2) == 0.12
+        assert half_up_round(0.125, 2) == 0.13
+        assert half_up_round(Decimal("0.125"), 2) == 0.13
+        assert half_up_round(0.125000000000001, 2) == 0.13
+
+        # 4 decimal places boundary: 0.00005 -> 0.0001
+        # Values strictly below 0.00005 must round down to 0.0000
+        assert half_up_round(0.000049999999999, 4) == 0.0000
+        assert half_up_round(Decimal("0.000049999999999999"), 4) == 0.0000
+        assert half_up_round(0.00005, 4) == 0.0001
+        assert half_up_round(Decimal("0.00005"), 4) == 0.0001
+        assert half_up_round(0.000050000000001, 4) == 0.0001
+        assert half_up_round(Decimal("0.000050000000000001"), 4) == 0.0001
+
+        # 4 decimal places with even 4th decimal (e.g. 0.00025 -> 0.0003, banker's would round to 0.0002)
+        assert half_up_round(0.000249999999999, 4) == 0.0002
+        assert half_up_round(Decimal("0.000249999999999999"), 4) == 0.0002
+        assert half_up_round(0.00025, 4) == 0.0003
+        assert half_up_round(Decimal("0.00025"), 4) == 0.0003
+        assert half_up_round(0.000250000000001, 4) == 0.0003
+        assert half_up_round(Decimal("0.000250000000000001"), 4) == 0.0003
+
     def test_mongo_live_half_up_round_expression(self):
         """
         Verify mongo_half_up_round_expr against actual MongoDB results when available.

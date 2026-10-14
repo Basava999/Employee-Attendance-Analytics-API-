@@ -48,7 +48,7 @@ def find_plan_stages(plan_dict: dict) -> list[str]:
 
 
 def verify_explain_plan_efficiency(explain_data: dict, expected_endpoint: str, expected_collection: str):
-    """Verify that explain output contains valid MongoDB executionStats and uses genuine index scans."""
+    """Verify that explain output contains valid MongoDB executionStats and uses genuine index scans without collection scans."""
     assert explain_data["endpoint"] == expected_endpoint
     assert explain_data["collection"] == expected_collection
     assert "explain" in explain_data
@@ -73,17 +73,44 @@ def verify_explain_plan_efficiency(explain_data: dict, expected_endpoint: str, e
         assert has_genuine_index, \
             f"Expected genuine index-backed execution stage (e.g. IXSCAN, COUNT_SCAN) for {expected_endpoint}, got stages: {stages}"
 
-        # Ensure no unindexed COLLSCAN on primary collection
-        primary_collscans = [
+        # Ensure NO unindexed COLLSCAN stage across ALL participating collections (primary and joined)
+        all_collscans = [
             e for e in stage_entries
-            if e["stage"] == "COLLSCAN" and (e["namespace"] is None or expected_collection in str(e["namespace"]))
+            if e["stage"] == "COLLSCAN"
         ]
-        assert len(primary_collscans) == 0, \
-            f"Unexpected COLLSCAN stage found on primary collection {expected_collection} for {expected_endpoint}: {stage_entries}"
+        assert len(all_collscans) == 0, \
+            f"Unexpected COLLSCAN stage found across participating collections for {expected_endpoint}: {all_collscans}"
 
 
 class TestExplainEndpoint:
     """Test GET /admin/explain/{endpoint}."""
+
+    @pytest.fixture(autouse=True)
+    def setup_explain_data(self, app_client):
+        """Seed required reference employee and logs for explain tests."""
+        from app.main import employees_col, attendance_col
+        employees_col.insert_one({
+            "emp_code": "EMP0001",
+            "name": "Explain Test User",
+            "email": "emp0001@example.com",
+            "department": "Engineering",
+            "joined_on": "2026-01-01",
+            "shift_start": "09:30",
+            "shift_end": "18:30",
+        })
+        attendance_col.insert_one({
+            "emp_code": "EMP0001",
+            "date": "2026-07-05",
+            "status": "PRESENT",
+            "punch_in": "2026-07-05T09:30:00Z",
+            "punch_out": "2026-07-05T18:30:00Z",
+            "half_day": False,
+            "late_minutes": 0,
+            "overtime_minutes": 0,
+        })
+        yield
+        employees_col.delete_many({})
+        attendance_col.delete_many({})
 
     def test_unknown_endpoint_422(self, app_client):
         resp = app_client.get("/admin/explain/non_existent_endpoint")
@@ -111,10 +138,26 @@ class TestExplainEndpoint:
         assert resp.status_code == 200
         verify_explain_plan_efficiency(resp.json(), "attendance_list", "attendance_logs")
 
+    def test_explain_attendance_list_invalid_status_422(self, app_client):
+        resp = app_client.get("/admin/explain/attendance_list?status=INVALID_STATUS")
+        assert resp.status_code == 422
+
+    def test_explain_attendance_list_invalid_date_422(self, app_client):
+        resp = app_client.get("/admin/explain/attendance_list?date_from=2026-99-99")
+        assert resp.status_code == 422
+
+    def test_explain_attendance_list_reversed_dates_422(self, app_client):
+        resp = app_client.get("/admin/explain/attendance_list?date_from=2026-07-31&date_to=2026-07-01")
+        assert resp.status_code == 422
+
     def test_explain_employee_monthly(self, app_client):
         resp = app_client.get("/admin/explain/employee_monthly?emp_code=EMP0001&month=2026-07")
         assert resp.status_code == 200
         verify_explain_plan_efficiency(resp.json(), "employee_monthly", "attendance_logs")
+
+    def test_explain_employee_monthly_unknown_employee_404(self, app_client):
+        resp = app_client.get("/admin/explain/employee_monthly?emp_code=EMP9999&month=2026-07")
+        assert resp.status_code == 404
 
     def test_explain_department_summary_unfiltered(self, app_client):
         resp = app_client.get("/admin/explain/department_summary?month=2026-07")
@@ -145,3 +188,15 @@ class TestExplainEndpoint:
         resp = app_client.get("/admin/explain/department_trend?department=Engineering&from=2026-07-01&to=2026-07-31")
         assert resp.status_code == 200
         verify_explain_plan_efficiency(resp.json(), "department_trend", "attendance_logs")
+
+    def test_explain_department_trend_unknown_department_404(self, app_client):
+        resp = app_client.get("/admin/explain/department_trend?department=NonExistentDept&from=2026-07-01&to=2026-07-07")
+        assert resp.status_code == 404
+
+    def test_explain_department_trend_reversed_dates_422(self, app_client):
+        resp = app_client.get("/admin/explain/department_trend?department=Engineering&from=2026-07-31&to=2026-07-01")
+        assert resp.status_code == 422
+
+    def test_explain_department_trend_range_exceeded_422(self, app_client):
+        resp = app_client.get("/admin/explain/department_trend?department=Engineering&from=2026-01-01&to=2026-05-01")
+        assert resp.status_code == 422

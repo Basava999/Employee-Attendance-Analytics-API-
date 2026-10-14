@@ -72,7 +72,7 @@ app/main.py          — All application code (single file, per assignment rules
 tests/               — Test suite
 sample_data/         — Sample MongoDB Extended JSON documents
 sample_seed.py       — Seeds sample data into MongoDB
-REVIEW.md            — Starter code defect review (47 defects found and repaired)
+REVIEW.md            — Starter code defect review (51 defects found and repaired)
 DECISIONS.md         — Design decision answers (5 questions)
 requirements.txt     — Python dependencies (includes application, pytest, httpx)
 .env.example         — Environment variable template
@@ -81,9 +81,15 @@ requirements.txt     — Python dependencies (includes application, pytest, http
 
 ## Performance & Verification
 
-- **100k Benchmark Verified**: Evaluated against a synthetic dataset of 100,000 attendance records across 1,000 employees. Paged employee listing (7.2ms), attendance listing (33.7ms), monthly employee analytics (7.7ms), and department aggregations (50-84ms) all execute efficiently under 100ms on MongoDB 6.0+/9.0.
-- **MongoDB Compatibility**: Full compatibility verified with MongoDB 6.0, 7.0, and 9.0 using native aggregation pipelines (`$densify`, `$setWindowFields`, `$lookup`).
-- **Explain Plans**: All five explain endpoints (`attendance_list`, `employee_monthly`, `department_summary`, `late_leaderboard`, `department_trend`) return genuine MongoDB executionStats with verified index-backed plans (`IXSCAN`).
+- **100k Benchmark Verified**: Evaluated against a synthetic dataset of 100,000 attendance records across 1,000 employees in 5 departments on MongoDB 9.0.2 (WiredTiger, local instance). Measured results across 20 iterations:
+  - Attendance listing (unfiltered 20 records): mean **1.31ms**, median **0.99ms**, p95 **2.98ms**
+  - Attendance listing (filtered by employee & 31-day date range): mean **1.35ms**, median **1.05ms**, p95 **4.00ms**
+  - Employee monthly analytics: mean **5.47ms**, median **4.96ms**, p95 **8.52ms**
+  - Department 31-day trend: mean **87.32ms**, median **80.42ms**, p95 **127.97ms**
+  - Late leaderboard (department, top 10): mean **134.84ms**, median **129.01ms**, p95 **186.63ms**
+  - Department monthly summary: mean **145.54ms**, median **145.63ms**, p95 **161.13ms**
+- **MongoDB Compatibility**: Full compatibility verified with MongoDB 6.0, 7.0, and 9.0 using native aggregation pipelines (`$densify`, `$setWindowFields`, `$lookup`, and `$documents` inside `$unionWith`).
+- **Explain Plans**: All five explain endpoints (`attendance_list`, `employee_monthly`, `department_summary`, `late_leaderboard`, `department_trend`) return authentic MongoDB `executionStats` with verified index-backed plans (`IXSCAN`) and zero collection scans (`COLLSCAN`) across all primary and participating collections.
 
 ## Submit
 

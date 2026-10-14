@@ -84,6 +84,35 @@ db = client[MONGO_DB]
 employees_col = db["employees"]
 attendance_col = db["attendance_logs"]
 
+from pymongo.collection import Collection
+from pymongo.database import Database
+
+_orig_col_getattribute = Collection.__getattribute__
+_orig_db_getattribute = Database.__getattribute__
+
+def _guarded_col_getattribute(self, name):
+    db_obj = _orig_col_getattribute(self, "_database")
+    cl_obj = _orig_db_getattribute(db_obj, "_client")
+    if cl_obj is not None and not getattr(getattr(cl_obj, "_topology", None), "_opened", False):
+        new_cl = MongoClient(MONGO_URI, tz_aware=True, serverSelectionTimeoutMS=5000)
+        db_obj._client = new_cl
+        global client
+        client = new_cl
+    return _orig_col_getattribute(self, name)
+
+def _guarded_db_getattribute(self, name):
+    cl_obj = _orig_db_getattribute(self, "_client")
+    if cl_obj is not None and not getattr(getattr(cl_obj, "_topology", None), "_opened", False):
+        new_cl = MongoClient(MONGO_URI, tz_aware=True, serverSelectionTimeoutMS=5000)
+        self._client = new_cl
+        global client
+        client = new_cl
+    return _orig_db_getattribute(self, name)
+
+Collection.__getattribute__ = _guarded_col_getattribute
+Database.__getattribute__ = _guarded_db_getattribute
+
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Index creation (called from lifespan)
@@ -157,11 +186,36 @@ def create_indexes():
 # ═══════════════════════════════════════════════════════════════════════════════
 # Lifespan: startup + shutdown
 # ═══════════════════════════════════════════════════════════════════════════════
+def ensure_db_connected():
+    """Ensure MongoDB client and collection handles are connected and open."""
+    global client, db, employees_col, attendance_col
+    try:
+        if client is None or not getattr(getattr(client, "_topology", None), "_opened", False):
+            client = MongoClient(
+                MONGO_URI,
+                tz_aware=True,
+                serverSelectionTimeoutMS=5000,
+            )
+            db._client = client
+            employees_col._database = db
+            attendance_col._database = db
+    except Exception as e:
+        logger.error(f"Error ensuring DB connected: {e}")
+    return client
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Modern lifespan handler — replaces deprecated on_event('startup')."""
+    """Modern lifespan handler — startup initializes indexes, shutdown closes MongoDB client."""
+    ensure_db_connected()
     create_indexes()
-    yield
+    try:
+        yield
+    finally:
+        try:
+            client.close()
+        except Exception as e:
+            logger.warning(f"Error closing MongoDB client during shutdown: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -186,21 +240,19 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 # ═══════════════════════════════════════════════════════════════════════════════
 # Rounding & arithmetic helpers
 # ═══════════════════════════════════════════════════════════════════════════════
-def half_up_round(value: float | int, decimals: int = 2) -> float:
+def half_up_round(value: float | int | Decimal | str, decimals: int = 2) -> float:
     """
     Round a numeric value to `decimals` places using decimal HALF_UP,
     not Python's default banker's rounding.
-
-    Uses round(value, 12) before Decimal conversion for floats to avoid
-    binary IEEE-754 representation epsilon near halfway boundaries.
+    Uses exact decimal arithmetic without premature float rounding.
     """
     if value is None:
         return None
-    if isinstance(value, float):
-        d = Decimal(str(round(value, 12)))
+    if isinstance(value, Decimal):
+        d = value
     else:
         d = Decimal(str(value))
-    quantize_str = "0." + "0" * decimals
+    quantize_str = "1" if decimals == 0 else ("0." + "0" * decimals)
     rounded = d.quantize(Decimal(quantize_str), rounding=ROUND_HALF_UP)
     return float(rounded)
 
@@ -1689,31 +1741,24 @@ def build_department_trend_pipeline(
         # Union with seed documents to guarantee densify has input covering both bounds
         {
             "$unionWith": {
-                "coll": "employees",
                 "pipeline": [
-                    {"$limit": 1},
                     {
-                        "$project": {
-                            "_id": 0,
-                            "seeds": [
-                                {
-                                    "date": {"$literal": date_from},
-                                    "status": {"$literal": "__SEED__"},
-                                    "half_day": {"$literal": False},
-                                    "late_minutes": {"$literal": 0},
-                                },
-                                {
-                                    "date": {"$literal": date_to},
-                                    "status": {"$literal": "__SEED__"},
-                                    "half_day": {"$literal": False},
-                                    "late_minutes": {"$literal": 0},
-                                },
-                            ],
-                        }
-                    },
-                    {"$unwind": "$seeds"},
-                    {"$replaceRoot": {"newRoot": "$seeds"}},
-                ],
+                        "$documents": [
+                            {
+                                "date": date_from,
+                                "status": "__SEED__",
+                                "half_day": False,
+                                "late_minutes": 0,
+                            },
+                            {
+                                "date": date_to,
+                                "status": "__SEED__",
+                                "half_day": False,
+                                "late_minutes": 0,
+                            },
+                        ]
+                    }
+                ]
             }
         },
         # Group by date to aggregate daily present_count and late_count
@@ -2131,6 +2176,31 @@ def explain_endpoint(
 
     try:
         if endpoint == "attendance_list":
+            # Validate status
+            if status is not None and status not in ALL_STATUSES:
+                raise RequestValidationError(
+                    [{"loc": ["query", "status"], "msg": f"status must be one of {sorted(ALL_STATUSES)}", "type": "value_error"}]
+                )
+            # Validate date params
+            if date_from is not None:
+                try:
+                    validate_date_string(date_from)
+                except ValueError:
+                    raise RequestValidationError(
+                        [{"loc": ["query", "date_from"], "msg": "invalid date", "type": "value_error"}]
+                    )
+            if date_to is not None:
+                try:
+                    validate_date_string(date_to)
+                except ValueError:
+                    raise RequestValidationError(
+                        [{"loc": ["query", "date_to"], "msg": "invalid date", "type": "value_error"}]
+                    )
+            if date_from is not None and date_to is not None and date_from > date_to:
+                raise RequestValidationError(
+                    [{"loc": ["query", "date_from"], "msg": "date_from must not be greater than date_to", "type": "value_error"}]
+                )
+
             q = build_attendance_list_query(emp_code, date_from, date_to, status)
             skip_val = (page - 1) * page_size
             explain_cmd = {
@@ -2151,7 +2221,20 @@ def explain_endpoint(
                     [{"loc": ["query"], "msg": "emp_code and month are required for employee_monthly", "type": "value_error"}]
                 )
             month_start_str, month_end_exclusive_str = validate_month_param(month)
-            pipeline = build_employee_monthly_pipeline(emp_code, month_start_str, month_end_exclusive_str)
+            emp = employees_col.find_one({"emp_code": emp_code}, {"_id": 0, "joined_on": 1})
+            if emp is None:
+                raise HTTPException(404, detail="Employee not found")
+
+            year, mon = int(month[:4]), int(month[5:7])
+            month_start = date(year, mon, 1)
+            _, last_day_num = calendar.monthrange(year, mon)
+            month_end = date(year, mon, last_day_num)
+            joined_on = date.fromisoformat(emp["joined_on"])
+            working_days = count_working_days(month_start, month_end, joined_on)
+
+            pipeline = build_employee_monthly_pipeline(
+                emp_code, month_start_str, month_end_exclusive_str, working_days=working_days
+            )
             explain_cmd = {
                 "aggregate": "attendance_logs",
                 "pipeline": pipeline,
@@ -2225,11 +2308,14 @@ def explain_endpoint(
                     [{"loc": ["query", "to"], "msg": "date range must not exceed 92 days", "type": "value_error"}]
                 )
 
-            # Get employee codes for the department
+            # Get employee codes for the department (matches real endpoint behavior)
             dept_employees = list(employees_col.find(
                 {"department": department}, {"_id": 0, "emp_code": 1, "joined_on": 1}
             ))
-            emp_codes = [e["emp_code"] for e in dept_employees] if dept_employees else ["__NONE__"]
+            if not dept_employees:
+                raise HTTPException(404, detail="Department not found (no employees)")
+
+            emp_codes = [e["emp_code"] for e in dept_employees]
 
             pipeline = build_department_trend_pipeline(
                 department, from_date, to_date, emp_codes
