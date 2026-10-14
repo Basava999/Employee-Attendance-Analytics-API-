@@ -39,7 +39,8 @@ def client():
         with patch.object(employees_col, "find_one", return_value=None), \
              patch.object(employees_col, "insert_one", return_value=MagicMock()), \
              patch.object(attendance_col, "find_one", return_value=None), \
-             patch.object(attendance_col, "insert_one", return_value=MagicMock()):
+             patch.object(attendance_col, "insert_one", return_value=MagicMock()), \
+             patch("app.main.create_indexes"):
             with TestClient(app) as tc:
                 yield tc
 
@@ -202,3 +203,146 @@ class TestExplainValidation:
     def test_department_trend_missing_params(self, client):
         resp = client.get("/admin/explain/department_trend")
         assert resp.status_code == 422
+
+    def test_department_trend_reversed_dates(self, client):
+        resp = client.get("/admin/explain/department_trend?department=Engineering&from=2026-07-07&to=2026-07-01")
+        assert resp.status_code == 422
+
+    def test_department_trend_range_over_92_days(self, client):
+        resp = client.get("/admin/explain/department_trend?department=Engineering&from=2026-01-01&to=2026-04-15")
+        assert resp.status_code == 422
+
+
+class TestRegularizeValidation:
+    """Test PATCH /attendance/{emp_code}/{date} request body validation -> 422."""
+
+    def test_explicit_null_punch_in_rejected_422(self, client):
+        resp = client.patch("/attendance/EMP0001/2026-07-06", json={
+            "punch_in": None,
+            "reason": "Biometric glitch",
+            "regularized_by": "hr.admin",
+        })
+        assert resp.status_code == 422
+
+    def test_explicit_null_punch_out_rejected_422(self, client):
+        resp = client.patch("/attendance/EMP0001/2026-07-06", json={
+            "punch_out": None,
+            "reason": "Biometric glitch",
+            "regularized_by": "hr.admin",
+        })
+        assert resp.status_code == 422
+
+    def test_explicit_null_status_rejected_422(self, client):
+        resp = client.patch("/attendance/EMP0001/2026-07-06", json={
+            "status": None,
+            "reason": "Biometric glitch",
+            "regularized_by": "hr.admin",
+        })
+        assert resp.status_code == 422
+
+    def test_invalid_status_rejected_422(self, client):
+        resp = client.patch("/attendance/EMP0001/2026-07-06", json={
+            "status": "VACATION",
+            "reason": "Biometric glitch",
+            "regularized_by": "hr.admin",
+        })
+        assert resp.status_code == 422
+
+    def test_punch_in_seconds_scale_rejected_422(self, client):
+        resp = client.patch("/attendance/EMP0001/2026-07-06", json={
+            "punch_in": 1783310280,  # seconds instead of epoch-ms (< 100 billion)
+            "reason": "Biometric glitch",
+            "regularized_by": "hr.admin",
+        })
+        assert resp.status_code == 422
+
+    def test_short_reason_rejected_422(self, client):
+        resp = client.patch("/attendance/EMP0001/2026-07-06", json={
+            "reason": "bad",
+            "regularized_by": "hr.admin",
+        })
+        assert resp.status_code == 422
+
+    def test_reason_too_long_rejected_422(self, client):
+        resp = client.patch("/attendance/EMP0001/2026-07-06", json={
+            "reason": "X" * 201,
+            "regularized_by": "hr.admin",
+        })
+        assert resp.status_code == 422
+
+    def test_empty_regularized_by_rejected_422(self, client):
+        resp = client.patch("/attendance/EMP0001/2026-07-06", json={
+            "reason": "Valid reason here",
+            "regularized_by": "",
+        })
+        assert resp.status_code == 422
+
+    def test_regularized_by_too_long_rejected_422(self, client):
+        resp = client.patch("/attendance/EMP0001/2026-07-06", json={
+            "reason": "Valid reason here",
+            "regularized_by": "A" * 51,
+        })
+        assert resp.status_code == 422
+
+
+class TestMonthParamValidation:
+    """Test validate_month_param() against malformed, boundary, and out-of-range calendar months."""
+
+    def test_year_zero_rejected_422(self, client):
+        """0000-01 has year 0, out of calendar range -> 422, never 500."""
+        from app.main import validate_month_param
+        from fastapi.exceptions import RequestValidationError
+        with pytest.raises(RequestValidationError):
+            validate_month_param("0000-01")
+
+        resp = client.get("/analytics/departments/summary?month=0000-01")
+        assert resp.status_code == 422
+        resp2 = client.get("/analytics/employees/EMP0001/monthly?month=0000-01")
+        assert resp2.status_code == 422
+
+    def test_year_9999_december_rejected_422(self, client):
+        """9999-12 would roll next month into year 10000 -> 422, never 500."""
+        from app.main import validate_month_param
+        from fastapi.exceptions import RequestValidationError
+        with pytest.raises(RequestValidationError):
+            validate_month_param("9999-12")
+
+        resp = client.get("/analytics/departments/summary?month=9999-12")
+        assert resp.status_code == 422
+        resp2 = client.get("/analytics/employees/EMP0001/monthly?month=9999-12")
+        assert resp2.status_code == 422
+
+    @pytest.mark.parametrize("bad_month", [
+        "2026-13",
+        "2026-00",
+        "2026-2",
+        "2026/07",
+        "July 2026",
+        "not-a-month",
+        "",
+        "99999-01",
+    ])
+    def test_malformed_month_strings_rejected_422(self, client, bad_month):
+        """Invalid month strings must return 422, never 500."""
+        resp = client.get(f"/analytics/departments/summary?month={bad_month}")
+        assert resp.status_code == 422
+
+    def test_ordinary_valid_months_accepted(self):
+        """Ordinary valid calendar months succeed and return expected start and exclusive-end ISO dates."""
+        from app.main import validate_month_param
+        start, end = validate_month_param("2026-07")
+        assert start == "2026-07-01"
+        assert end == "2026-08-01"
+
+        start_dec, end_dec = validate_month_param("2026-12")
+        assert start_dec == "2026-12-01"
+        assert end_dec == "2027-01-01"
+
+        start_jan, end_jan = validate_month_param("2026-01")
+        assert start_jan == "2026-01-01"
+        assert end_jan == "2026-02-01"
+
+        start_9999, end_9999 = validate_month_param("9999-11")
+        assert start_9999 == "9999-11-01"
+        assert end_9999 == "9999-12-01"
+

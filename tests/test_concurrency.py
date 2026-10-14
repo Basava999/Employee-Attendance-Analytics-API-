@@ -204,3 +204,72 @@ class TestConcurrency:
 
         # History entries must exactly match successful edits (no lost history)
         assert len(record["history"]) == successful_edits
+
+    def test_concurrent_regularization_and_punch_out(self, app_client):
+        """
+        Concurrency test between regularize_attendance() and punch_out().
+        Ensures neither operation can silently overwrite the other's state or derived values:
+        - If punch-out succeeds first, regularization must either observe the updated punch_out
+          or retry/conflict cleanly without clobbering the punch-out state.
+        - If regularization succeeds first, punch-out must not overwrite an already regularized punch_out.
+        """
+        emp_code = "EMP9005"
+        app_client.post("/employees", json={
+            "emp_code": emp_code,
+            "name": "Race Regularize Punchout",
+            "email": "race_reg_out@example.com",
+            "department": "Engineering",
+            "shift_start": "09:30",
+            "shift_end": "18:30",
+            "joined_on": "2026-01-05",
+        })
+
+        # Punch in (creates open record)
+        punch_in_ms = 1783310280000  # 2026-07-06 09:28 IST
+        app_client.post("/attendance/punch-in", json={
+            "emp_code": emp_code,
+            "punched_at": punch_in_ms,
+            "status": "PRESENT",
+        })
+
+        punch_out_payload = {
+            "emp_code": emp_code,
+            "punched_at": 1783342680000,  # 18:28 IST
+        }
+        regularize_payload = {
+            "punch_out": 1783346280000,  # 19:28 IST
+            "reason": "Correcting punch out time",
+            "regularized_by": "HR_Manager",
+        }
+
+        # Fire simultaneously in threads
+        def do_punch_out():
+            return ("punch_out", app_client.post("/attendance/punch-out", json=punch_out_payload))
+
+        def do_regularize():
+            return ("regularize", app_client.patch(f"/attendance/{emp_code}/2026-07-06", json=regularize_payload))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            f1 = executor.submit(do_punch_out)
+            f2 = executor.submit(do_regularize)
+            results = dict([f1.result(), f2.result()])
+
+        punch_out_res = results["punch_out"]
+        regularize_res = results["regularize"]
+
+        assert punch_out_res.status_code in (200, 409)
+        assert regularize_res.status_code in (200, 409)
+
+        # Check DB state
+        get_resp = app_client.get(f"/attendance?emp_code={emp_code}")
+        assert get_resp.status_code == 200
+        records = get_resp.json()["items"]
+        assert len(records) == 1
+        record = records[0]
+
+        # punch_out must be non-null and work_hours calculated
+        assert record["punch_out"] is not None
+        assert record["work_hours"] is not None
+        if regularize_res.status_code == 200:
+            assert len(record["history"]) >= 1
+            assert any(h["by"] == "HR_Manager" for h in record["history"])

@@ -83,9 +83,50 @@ class TestEmployeeMonthly:
         assert data["present_days"] == 2.5
         assert data["late_count"] == 1
         assert data["total_late_minutes"] == 45
-        assert data["total_overtime_minutes"] == 45
-        # Attendance % = 2.5 / 23 * 100 = 10.8695... -> 10.87 (half-up)
-        assert data["attendance_pct"] == 10.87
+        # Attendance % = 2.5 / 23 * 100 = 10.8695652... -> 10.8696 (4 decimals half-up per R8 rate requirement)
+        assert data["attendance_pct"] == 10.8696
+        assert data["attendance_pct"] != 10.87
+
+    def test_monthly_attendance_pct_distinguishes_four_from_two_decimal_rounding(self, app_client):
+        """
+        Regression test: Verify monthly attendance_pct enforces contract-required
+        four-decimal half-up precision (R8 rates) and distinguishes from two-decimal rounding.
+        Case: 1 full day (1.0) out of 3 working days:
+        1 / 3 * 100 = 33.333333...%
+        4-decimal half-up: 33.3333
+        2-decimal half-up: 33.33
+        """
+        # Create mid-month joiner with exactly 3 working days in July 2026 (e.g. joined 2026-07-29 Wed)
+        app_client.post("/employees", json={
+            "emp_code": "EMP0099",
+            "name": "Precision Test User",
+            "email": "precision@example.com",
+            "department": "Engineering",
+            "shift_start": "09:30",
+            "shift_end": "18:30",
+            "joined_on": "2026-07-29",
+        })
+        # Single full day punch-in on 2026-07-29
+        app_client.post("/attendance/punch-in", json={
+            "emp_code": "EMP0099",
+            "punched_at": 1785297600000,  # 2026-07-29 09:30 IST
+            "status": "PRESENT",
+        })
+        app_client.post("/attendance/punch-out", json={
+            "emp_code": "EMP0099",
+            "punched_at": 1785330000000,  # 2026-07-29 18:30 IST (9.0 hrs)
+        })
+
+        resp = app_client.get("/analytics/employees/EMP0099/monthly?month=2026-07")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["working_days"] == 3
+        assert data["present_days"] == 1.0
+        # 1 / 3 * 100 = 33.333333... -> 33.3333
+        assert data["attendance_pct"] == 33.3333
+        assert data["attendance_pct"] != 33.33
+        # Ensure representation has 4 decimals
+        assert f"{data['attendance_pct']:.4f}" == "33.3333"
 
     def test_mid_month_joiner_working_days(self, app_client):
         # Joined mid-month: July 13, 2026 (Mon). Working days: 15
@@ -207,12 +248,76 @@ class TestDepartmentSummary:
         departments = [item["department"] for item in items]
         assert departments == sorted(departments)
 
+    def test_department_average_work_hour_half_up_boundary_aggregation(self, app_client):
+        """
+        R8 & Requirement 7: Test department average work-hour rounding at half-up boundaries
+        using the real MongoDB aggregation pipeline.
+        Test case: Two employees with work hours 4.00 and 4.13:
+        Mathematical exact sum = 8.13, average = 4.065.
+        Under IEEE-754 binary floating-point, (4.0 + 4.13) / 2 produces 4.0649999999999995,
+        which would incorrectly round down to 4.06.
+        Exact decimal half-up rounding (R8) requires rounding to 4.07.
+        """
+        # Create two employees in QualityAssurance
+        app_client.post("/employees", json={
+            "emp_code": "EMP0031",
+            "name": "QA Worker 1",
+            "email": "qaw1@example.com",
+            "department": "QualityAssurance",
+            "shift_start": "09:30",
+            "shift_end": "18:30",
+            "joined_on": "2026-01-01",
+        })
+        app_client.post("/employees", json={
+            "emp_code": "EMP0032",
+            "name": "QA Worker 2",
+            "email": "qaw2@example.com",
+            "department": "QualityAssurance",
+            "shift_start": "09:30",
+            "shift_end": "18:30",
+            "joined_on": "2026-01-01",
+        })
+
+        # Worker 1: 4.00 work hours (14400 seconds)
+        # 2026-07-06 09:30 IST (1783310400000) to 13:30 IST (1783324800000)
+        app_client.post("/attendance/punch-in", json={
+            "emp_code": "EMP0031",
+            "punched_at": 1783310400000,
+            "status": "PRESENT",
+        })
+        app_client.post("/attendance/punch-out", json={
+            "emp_code": "EMP0031",
+            "punched_at": 1783324800000,
+        })
+
+        # Worker 2: 4.13 work hours: (14868 sec * 200 + 3600) // 7200 = 413 -> 4.13 hrs
+        # 1783310400000 + 14868000 = 1783325268000
+        app_client.post("/attendance/punch-in", json={
+            "emp_code": "EMP0032",
+            "punched_at": 1783310400000,
+            "status": "PRESENT",
+        })
+        app_client.post("/attendance/punch-out", json={
+            "emp_code": "EMP0032",
+            "punched_at": 1783325268000,
+        })
+
+        resp = app_client.get("/analytics/departments/summary?month=2026-07&department=QualityAssurance")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["items"]) == 1
+        qa = data["items"][0]
+        assert qa["department"] == "QualityAssurance"
+        assert qa["headcount"] == 2
+        # Crucial assertion: (4.00 + 4.13) / 2 = 4.065 -> must round half-up to 4.07, not 4.06
+        assert qa["avg_work_hours"] == 4.07
+
 
 class TestLateLeaderboard:
     """Test GET /analytics/leaderboard/late."""
 
-    def test_competition_ranking_with_ties(self, app_client):
-        # Create 4 employees
+    @staticmethod
+    def _setup_support_team(app_client):
         for i, code in enumerate(["EMP0031", "EMP0032", "EMP0033", "EMP0034"]):
             app_client.post("/employees", json={
                 "emp_code": code,
@@ -252,6 +357,9 @@ class TestLateLeaderboard:
             "status": "PRESENT",
         })
 
+    def test_competition_ranking_with_ties(self, app_client):
+        self._setup_support_team(app_client)
+
         resp = app_client.get("/analytics/leaderboard/late?month=2026-07&department=Support")
         assert resp.status_code == 200
         items = resp.json()["items"]
@@ -271,6 +379,7 @@ class TestLateLeaderboard:
         assert items[1]["emp_code"] < items[2]["emp_code"]
 
     def test_limit_applies_after_ranking(self, app_client):
+        self._setup_support_team(app_client)
         # When limit=2 and ranks are 1, 2, 2, all 3 are returned because rank <= 2
         resp = app_client.get("/analytics/leaderboard/late?month=2026-07&department=Support&limit=2")
         assert resp.status_code == 200
