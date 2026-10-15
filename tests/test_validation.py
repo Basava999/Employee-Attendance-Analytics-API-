@@ -82,7 +82,10 @@ class TestEmployeeValidation:
             "department": "D", "shift_start": "09:30", "shift_end": "09:30",
             "joined_on": "2026-01-05",
         })
-        assert resp.status_code == 422
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["shift_start"] == "09:30"
+        assert data["shift_end"] == "09:30"
 
     def test_invalid_joined_on_date(self, client):
         """Feb 30 doesn't exist."""

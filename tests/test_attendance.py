@@ -232,6 +232,42 @@ class TestPunchOut:
         assert data["work_hours"] == 3.5
         assert data["half_day"] == True
 
+    def test_equal_shift_punch_in_and_punch_out(self, client):
+        """Equal shift (09:30-09:30): 24h shift treated as overnight. Verify date attribution, hours, and 24h limit."""
+        _create_emp(client, "EMP0099", shift_start="09:30", shift_end="09:30")
+        from datetime import datetime, timezone
+        # Punch in at 09:30 IST July 6 = 04:00 UTC July 6
+        ts_in = int(datetime(2026, 7, 6, 4, 0, 0, tzinfo=timezone.utc).timestamp() * 1000)
+        # Punch out at 09:30 IST July 7 = 04:00 UTC July 7 (exactly 24h later)
+        ts_out = int(datetime(2026, 7, 7, 4, 0, 0, tzinfo=timezone.utc).timestamp() * 1000)
+        # Punch out > 24h later (09:30:01 IST July 7)
+        ts_out_too_late = ts_out + 1000
+
+        resp_in = client.post("/attendance/punch-in", json={
+            "emp_code": "EMP0099", "punched_at": ts_in,
+        })
+        assert resp_in.status_code == 201
+        data_in = resp_in.json()
+        assert data_in["date"] == "2026-07-06"
+        assert data_in["late_minutes"] == 0
+
+        # Punch out after >24h should return 422
+        resp_too_late = client.post("/attendance/punch-out", json={
+            "emp_code": "EMP0099", "punched_at": ts_out_too_late,
+        })
+        assert resp_too_late.status_code == 422
+
+        # Valid punch out at 24h boundary returns 200
+        resp_out = client.post("/attendance/punch-out", json={
+            "emp_code": "EMP0099", "punched_at": ts_out,
+        })
+        assert resp_out.status_code == 200
+        data_out = resp_out.json()
+        assert data_out["date"] == "2026-07-06"
+        assert data_out["work_hours"] == 24.0
+        assert data_out["overtime_minutes"] == 0
+        assert data_out["half_day"] == False
+
 
 class TestListAttendance:
     def test_sorted_date_desc_empcode_asc(self, client):

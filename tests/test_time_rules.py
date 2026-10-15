@@ -480,6 +480,38 @@ class TestAttendanceDate:
         result = compute_attendance_date(dt, "22:00", "06:00")
         assert result == "2026-07-07"
 
+    def test_equal_shift_normal_punch(self):
+        """Equal shift 09:30-09:30, punch at 09:35 IST on July 6th → date 2026-07-06."""
+        from app.main import compute_attendance_date
+        # 09:35:00 IST = 04:05:00 UTC July 6th
+        dt = datetime(2026, 7, 6, 4, 5, 0, tzinfo=timezone.utc)
+        result = compute_attendance_date(dt, "09:30", "09:30")
+        assert result == "2026-07-06"
+
+    def test_equal_shift_before_boundary(self):
+        """Equal shift 09:30-09:30, punch at 09:29:59 IST on July 7th → date 2026-07-06 (previous day)."""
+        from app.main import compute_attendance_date
+        # 09:29:59 IST July 7th = 03:59:59 UTC July 7th
+        dt = datetime(2026, 7, 7, 3, 59, 59, tzinfo=timezone.utc)
+        result = compute_attendance_date(dt, "09:30", "09:30")
+        assert result == "2026-07-06"
+
+    def test_equal_shift_exact_boundary(self):
+        """Equal shift 09:30-09:30, punch at 09:30:00 IST on July 7th → date 2026-07-07."""
+        from app.main import compute_attendance_date
+        # 09:30:00 IST July 7th = 04:00:00 UTC July 7th
+        dt = datetime(2026, 7, 7, 4, 0, 0, tzinfo=timezone.utc)
+        result = compute_attendance_date(dt, "09:30", "09:30")
+        assert result == "2026-07-07"
+
+    def test_equal_shift_after_boundary(self):
+        """Equal shift 09:30-09:30, punch at 09:30:01 IST on July 7th → date 2026-07-07."""
+        from app.main import compute_attendance_date
+        # 09:30:01 IST July 7th = 04:00:01 UTC July 7th
+        dt = datetime(2026, 7, 7, 4, 0, 1, tzinfo=timezone.utc)
+        result = compute_attendance_date(dt, "09:30", "09:30")
+        assert result == "2026-07-07"
+
 
 class TestLateMinutes:
     """Test the R2 late minutes computation."""
@@ -566,6 +598,38 @@ class TestOvertimeMinutes:
         # 18:00 IST = 12:30 UTC
         punch_out = datetime(2026, 7, 6, 12, 30, 0, tzinfo=timezone.utc)
         result = compute_overtime_minutes(punch_out, "18:30", "09:30", "2026-07-06")
+        assert result == 0
+
+    def test_equal_shift_overtime_under_threshold(self):
+        """Equal shift 09:30-09:30 (overnight 24h). Punch out 09:59 IST next day (29 min after) → 0."""
+        from app.main import compute_overtime_minutes
+        # 09:59 IST July 7th = 04:29 UTC July 7th
+        punch_out = datetime(2026, 7, 7, 4, 29, 0, tzinfo=timezone.utc)
+        result = compute_overtime_minutes(punch_out, "09:30", "09:30", "2026-07-06")
+        assert result == 0
+
+    def test_equal_shift_overtime_exact_threshold(self):
+        """Equal shift 09:30-09:30 (overnight 24h). Punch out 10:00 IST next day (30 min after) → 30."""
+        from app.main import compute_overtime_minutes
+        # 10:00 IST July 7th = 04:30 UTC July 7th
+        punch_out = datetime(2026, 7, 7, 4, 30, 0, tzinfo=timezone.utc)
+        result = compute_overtime_minutes(punch_out, "09:30", "09:30", "2026-07-06")
+        assert result == 30
+
+    def test_equal_shift_overtime_above_threshold(self):
+        """Equal shift 09:30-09:30 (overnight 24h). Punch out 10:15 IST next day (45 min after) → 45."""
+        from app.main import compute_overtime_minutes
+        # 10:15 IST July 7th = 04:45 UTC July 7th
+        punch_out = datetime(2026, 7, 7, 4, 45, 0, tzinfo=timezone.utc)
+        result = compute_overtime_minutes(punch_out, "09:30", "09:30", "2026-07-06")
+        assert result == 45
+
+    def test_equal_shift_punch_out_same_day(self):
+        """Equal shift 09:30-09:30. Punch out 20:00 IST same day (before shift end on D+1) → 0."""
+        from app.main import compute_overtime_minutes
+        # 20:00 IST July 6th = 14:30 UTC July 6th
+        punch_out = datetime(2026, 7, 6, 14, 30, 0, tzinfo=timezone.utc)
+        result = compute_overtime_minutes(punch_out, "09:30", "09:30", "2026-07-06")
         assert result == 0
 
 

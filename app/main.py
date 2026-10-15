@@ -702,11 +702,8 @@ class EmployeeCreate(BaseModel):
             raise ValueError("joined_on must be a valid YYYY-MM-DD date")
         return v
 
-    @model_validator(mode="after")
-    def validate_shift_not_equal(self):
-        if self.shift_start == self.shift_end:
-            raise ValueError("shift_start must differ from shift_end")
-        return self
+    # Note: shift_start == shift_end is valid — treated as overnight (24h) shift
+    # per assignment rule: overnight shifts use shift_end <= shift_start
 
 
 class PunchInRequest(BaseModel):
